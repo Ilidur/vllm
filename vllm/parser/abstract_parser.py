@@ -715,6 +715,7 @@ class DelegatingParser(Parser):
                 delta_token_ids=delta_token_ids,
             )
             reasoning_parser = self._reasoning_parser
+            reasoning_skipped = False
             if reasoning_parser is not None and reasoning_parser.engine_based_streaming:
                 should_transition = (
                     reasoning_parser.has_engine_confirmed_reasoning_end()
@@ -723,7 +724,28 @@ class DelegatingParser(Parser):
                 should_transition = self._is_reasoning_end_streaming(
                     current_token_ids, delta_token_ids
                 )
-            if should_transition:
+                if not should_transition:
+                    # Some hybrid-thinking models (e.g. Qwen3) can skip the
+                    # <think>...</think> block entirely for requests that
+                    # don't need it. is_reasoning_end_streaming() only
+                    # detects the *end* token, so it never fires in that
+                    # case and reasoning would stay "open" forever, routing
+                    # everything -- including tool-call markup -- through
+                    # extract_reasoning_streaming() as plain content.
+                    start_token = getattr(reasoning_parser, "start_token", None)
+                    reasoning_skipped = (
+                        start_token is not None
+                        and len(current_text) >= len(start_token)
+                        and not current_text.startswith(start_token)
+                    )
+                    should_transition = reasoning_skipped
+            if should_transition and reasoning_skipped:
+                # No <think> block was ever produced, so there is nothing
+                # to strip -- keep the accumulated text/token ids as-is
+                # and let the tool-call phase parse them directly.
+                state.reasoning_ended = True
+                reasoning_transitioned = True
+            elif should_transition:
                 state.reasoning_ended = True
                 reasoning_transitioned = True
                 current_token_ids = self._extract_content_ids(delta_token_ids)
